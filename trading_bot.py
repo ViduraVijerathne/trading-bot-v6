@@ -57,6 +57,34 @@ SCAN_SYMBOLS = [
     'UNI/USDT:USDT',
 ]
 
+AVAILABLE_SYMBOLS = [
+    'BTC/USDT:USDT',
+    'ETH/USDT:USDT',
+    'BNB/USDT:USDT',
+    'SOL/USDT:USDT',
+    'XRP/USDT:USDT',
+    'DOGE/USDT:USDT',
+    'ADA/USDT:USDT',
+    'AVAX/USDT:USDT',
+    'LINK/USDT:USDT',
+    'MATIC/USDT:USDT',
+    'DOT/USDT:USDT',
+    'UNI/USDT:USDT',
+    'NEAR/USDT:USDT',
+    'APT/USDT:USDT',
+    'ARB/USDT:USDT',
+    'OP/USDT:USDT',
+    'FIL/USDT:USDT',
+    'LTC/USDT:USDT',
+    'ATOM/USDT:USDT',
+    'FTM/USDT:USDT',
+]
+
+DEFAULT_SELECTED_SYMBOLS = [
+    'BTC/USDT:USDT',
+    'ETH/USDT:USDT',
+]
+
 TIMEFRAME = '5m'
 CANDLE_LIMIT = 200
 WS_BASE_URL = 'wss://fstream.binance.com/stream'
@@ -494,6 +522,7 @@ class BotState:
         self.backtest_results: Optional[Dict] = None
         self.last_update: Optional[datetime] = None
         self.ws_connected: bool = False
+        self.selected_symbols: List[str] = list(DEFAULT_SELECTED_SYMBOLS)
 
     def add_open_position(self, pos: PositionState) -> None:
         """Add a new open position (thread-safe)."""
@@ -706,18 +735,20 @@ class WebSocketManager:
     """
     Manages WebSocket connections to Binance Futures in a background thread.
     Maintains a cache of latest OHLCV data for each symbol.
+    Uses bot_state.selected_symbols for dynamic symbol selection.
     """
 
-    def __init__(self):
+    def __init__(self, bot_state: 'BotState'):
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._thread: Optional[threading.Thread] = None
         self._lock = threading.Lock()
         self.kline_cache: Dict[str, deque] = {}
         self.connected: bool = False
         self._stop_event = threading.Event()
+        self.bot_state = bot_state
 
-        # Initialize cache for each symbol
-        for symbol in SCAN_SYMBOLS:
+        # Initialize cache for all available symbols
+        for symbol in AVAILABLE_SYMBOLS:
             self.kline_cache[symbol] = deque(maxlen=500)
 
     def start(self) -> None:
@@ -755,9 +786,10 @@ class WebSocketManager:
 
         while not self._stop_event.is_set() and attempt < max_attempts:
             try:
-                # Build stream names
+                # Build stream names from selected symbols
                 streams = []
-                for symbol in SCAN_SYMBOLS:
+                symbols_to_stream = self.bot_state.selected_symbols if self.bot_state.selected_symbols else SCAN_SYMBOLS
+                for symbol in symbols_to_stream:
                     stream_name = self._symbol_to_stream(symbol)
                     streams.append(stream_name)
 
@@ -834,7 +866,7 @@ class WebSocketManager:
         """Convert stream name back to symbol."""
         # stream format: btcusdt@kline_5m
         pair = stream.split('@')[0] if '@' in stream else ''
-        for symbol in SCAN_SYMBOLS:
+        for symbol in AVAILABLE_SYMBOLS:
             expected = symbol.lower().replace('/', '').replace(':usdt', '')
             if pair == expected:
                 return symbol
@@ -902,14 +934,15 @@ class BotScanner:
                 time.sleep(1)
 
     def _do_scan(self) -> None:
-        """Perform a full scan of all symbols."""
+        """Perform a full scan of selected symbols."""
         if not self.bot_state.is_running:
             return
 
         if self.bot_state.mode == 'backtrack':
             return
 
-        for symbol in SCAN_SYMBOLS:
+        symbols_to_scan = self.bot_state.selected_symbols if self.bot_state.selected_symbols else SCAN_SYMBOLS
+        for symbol in symbols_to_scan:
             if self._stop_event.is_set():
                 break
 
@@ -1280,7 +1313,43 @@ class BacktestEngine:
 
 
 # =============================================================================
-# SECTION 12 - STREAMLIT UI
+# SECTION 12 - MODULE-LEVEL GLOBAL SINGLETONS (persist across page refreshes)
+# =============================================================================
+_global_lock = threading.Lock()
+_global_bot_state: Optional[BotState] = None
+_global_ws_manager: Optional[WebSocketManager] = None
+_global_scanner: Optional[BotScanner] = None
+
+
+def get_bot_state() -> BotState:
+    """Get or create the global BotState singleton (persists across Streamlit reruns)."""
+    global _global_bot_state
+    with _global_lock:
+        if _global_bot_state is None:
+            _global_bot_state = BotState()
+        return _global_bot_state
+
+
+def get_ws_manager() -> WebSocketManager:
+    """Get or create the global WebSocketManager singleton."""
+    global _global_ws_manager
+    with _global_lock:
+        if _global_ws_manager is None:
+            _global_ws_manager = WebSocketManager(get_bot_state())
+        return _global_ws_manager
+
+
+def get_scanner() -> BotScanner:
+    """Get or create the global BotScanner singleton."""
+    global _global_scanner
+    with _global_lock:
+        if _global_scanner is None:
+            _global_scanner = BotScanner(get_bot_state(), get_ws_manager(), RiskManager())
+        return _global_scanner
+
+
+# =============================================================================
+# SECTION 13 - STREAMLIT UI
 # =============================================================================
 def main():
     """Main Streamlit application function."""
@@ -1291,24 +1360,17 @@ def main():
     )
 
     # -------------------------------------------------------------------------
-    # Initialize session state on first run
+    # Use module-level global singletons (persist across page refreshes)
     # -------------------------------------------------------------------------
-    if 'bot_state' not in st.session_state:
-        st.session_state.bot_state = BotState()
-    if 'ws_manager' not in st.session_state:
-        st.session_state.ws_manager = WebSocketManager()
-    if 'scanner' not in st.session_state:
-        st.session_state.scanner = BotScanner(
-            st.session_state.bot_state,
-            st.session_state.ws_manager,
-            RiskManager()
-        )
+    bot = get_bot_state()
+    ws_manager = get_ws_manager()
+    scanner = get_scanner()
+
+    # Only use session_state for UI-specific state
     if 'backtest_engine' not in st.session_state:
         st.session_state.backtest_engine = BacktestEngine()
     if 'auto_refresh' not in st.session_state:
-        st.session_state.auto_refresh = False
-
-    bot = st.session_state.bot_state
+        st.session_state.auto_refresh = bot.is_running
 
     # -------------------------------------------------------------------------
     # SIDEBAR - Bot Control
@@ -1328,6 +1390,19 @@ def main():
         capital = st.slider('Capital ($)', 0.0, 20.0, 20.0, 0.5)
         leverage = st.slider('Leverage', 1, 10, 3)
         max_concurrent = st.selectbox('Max Concurrent Trades', [1, 2], index=1)
+        st.divider()
+
+        # Coin Pair Selector
+        st.subheader('\U0001f4b1 Coins to Scan')
+        selected_symbols = st.multiselect(
+            'Select coin pairs',
+            options=AVAILABLE_SYMBOLS,
+            default=bot.selected_symbols,
+            help='Choose which coin pairs the bot will scan for trading signals.'
+        )
+        # Update bot state with selected symbols
+        if selected_symbols:
+            bot.selected_symbols = selected_symbols
         st.divider()
 
         st.subheader('\U0001f4ca Strategy Toggles')
@@ -1350,23 +1425,23 @@ def main():
                 if not bot.is_running:
                     bot.is_running = True
                     if mode in ('test', 'real'):
-                        st.session_state.ws_manager.start()
-                        st.session_state.scanner.start()
+                        ws_manager.start()
+                        scanner.start()
                     st.session_state.auto_refresh = True
                     st.rerun()
 
         with col_stop:
             if st.button('\u23f9 Stop', use_container_width=True):
                 bot.is_running = False
-                st.session_state.scanner.stop()
-                st.session_state.ws_manager.stop()
+                scanner.stop()
+                ws_manager.stop()
                 st.session_state.auto_refresh = False
                 st.rerun()
 
         # Always sync strategy toggles
-        st.session_state.bot_state.active_strategies = active_strategies
-        st.session_state.bot_state.capital = capital
-        st.session_state.bot_state.leverage = leverage
+        bot.active_strategies = active_strategies
+        bot.capital = capital
+        bot.leverage = leverage
 
         # Status indicator
         if bot.is_running:
@@ -1374,7 +1449,7 @@ def main():
         else:
             st.error('\U0001f534 Bot Stopped')
 
-        ws_status = '\U0001f7e2 Connected' if st.session_state.ws_manager.connected else '\U0001f534 Disconnected'
+        ws_status = '\U0001f7e2 Connected' if ws_manager.connected else '\U0001f534 Disconnected'
         st.caption(f'WebSocket: {ws_status}')
 
     # -------------------------------------------------------------------------
@@ -1401,7 +1476,7 @@ def main():
         if st.button('Run Backtest Now', type='primary'):
             with st.spinner('Running backtest...'):
                 results = st.session_state.backtest_engine.run(bot)
-                st.session_state.bot_state.backtest_results = results
+                bot.backtest_results = results
 
         if bot.backtest_results:
             r = bot.backtest_results
@@ -1469,7 +1544,7 @@ def main():
 
 
 # =============================================================================
-# SECTION 13 - ENTRY POINT
+# SECTION 14 - ENTRY POINT
 # =============================================================================
 if __name__ == '__main__':
     main()
