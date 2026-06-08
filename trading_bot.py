@@ -523,11 +523,21 @@ class BotState:
         self.last_update: Optional[datetime] = None
         self.ws_connected: bool = False
         self.selected_symbols: List[str] = list(DEFAULT_SELECTED_SYMBOLS)
+        self.log_entries: List[str] = []
+
+    def add_log(self, message: str) -> None:
+        """Add a timestamped entry to the activity log."""
+        with self._lock:
+            timestamp = datetime.now().strftime('%H:%M:%S')
+            self.log_entries.append(f"[{timestamp}] {message}")
+            if len(self.log_entries) > 100:
+                self.log_entries = self.log_entries[-100:]
 
     def add_open_position(self, pos: PositionState) -> None:
         """Add a new open position (thread-safe)."""
         with self._lock:
             self.open_positions[pos.symbol] = pos
+            self.log_entries.append(f"[{datetime.now().strftime('%H:%M:%S')}] TRADE OPENED: {pos.side} {pos.symbol} @ {pos.entry_price:.4f}")
             logger.info(f"Opened {pos.side} position on {pos.symbol} at {pos.entry_price}")
 
     def close_position(self, symbol: str, exit_price: float) -> Optional[TradeRecord]:
@@ -582,6 +592,7 @@ class BotState:
             self.trade_history.append(trade)
             del self.open_positions[symbol]
 
+            self.log_entries.append(f"[{datetime.now().strftime('%H:%M:%S')}] TRADE CLOSED: {pos.side} {symbol} | PnL: ${pnl:.4f} | {status}")
             logger.info(f"Closed {pos.side} on {symbol} | PnL: ${pnl:.4f} | Status: {status}")
             return trade
 
@@ -942,6 +953,7 @@ class BotScanner:
             return
 
         symbols_to_scan = self.bot_state.selected_symbols if self.bot_state.selected_symbols else SCAN_SYMBOLS
+        self.bot_state.add_log(f"Scanning {len(symbols_to_scan)} symbols...")
         for symbol in symbols_to_scan:
             if self._stop_event.is_set():
                 break
@@ -957,8 +969,10 @@ class BotScanner:
                 # Mock data fallback for test mode if real data unavailable
                 if (df is None or len(df) < 60) and self.bot_state.mode == 'test':
                     df = generate_mock_ohlcv(symbol, 200)
+                    self.bot_state.add_log(f"Using simulated data for {symbol}")
 
                 if df is None or len(df) < 60:
+                    self.bot_state.add_log(f"No data for {symbol}, skipping")
                     continue
 
                 # Compute indicators
@@ -972,26 +986,31 @@ class BotScanner:
                 if self.bot_state.active_strategies.get('trend', False):
                     signal = strategy_trend_following(df)
                     if signal:
+                        self.bot_state.add_log(f"Signal: {signal['strategy']} {signal['side']} on {symbol}")
                         self._try_enter_trade(symbol, signal, df)
 
                 if self.bot_state.active_strategies.get('mean_reversion', False):
                     signal = strategy_mean_reversion(df)
                     if signal:
+                        self.bot_state.add_log(f"Signal: {signal['strategy']} {signal['side']} on {symbol}")
                         self._try_enter_trade(symbol, signal, df)
 
                 if self.bot_state.active_strategies.get('momentum', False):
                     signal = strategy_momentum(df)
                     if signal:
+                        self.bot_state.add_log(f"Signal: {signal['strategy']} {signal['side']} on {symbol}")
                         self._try_enter_trade(symbol, signal, df)
 
                 if self.bot_state.active_strategies.get('breakout', False):
                     signal = strategy_breakout(df)
                     if signal:
+                        self.bot_state.add_log(f"Signal: {signal['strategy']} {signal['side']} on {symbol}")
                         self._try_enter_trade(symbol, signal, df)
 
             except Exception as e:
                 logger.error(f"Error scanning {symbol}: {e}")
 
+        self.bot_state.add_log("Scan cycle complete. Next scan in 30s.")
         self.bot_state.last_update = datetime.now()
 
     def _fetch_rest_fallback(self, symbol: str) -> Optional[pd.DataFrame]:
@@ -1320,43 +1339,7 @@ class BacktestEngine:
 
 
 # =============================================================================
-# SECTION 12 - MODULE-LEVEL GLOBAL SINGLETONS (persist across page refreshes)
-# =============================================================================
-_global_lock = threading.RLock()
-_global_bot_state: Optional[BotState] = None
-_global_ws_manager: Optional[WebSocketManager] = None
-_global_scanner: Optional[BotScanner] = None
-
-
-def get_bot_state() -> BotState:
-    """Get or create the global BotState singleton (persists across Streamlit reruns)."""
-    global _global_bot_state
-    with _global_lock:
-        if _global_bot_state is None:
-            _global_bot_state = BotState()
-        return _global_bot_state
-
-
-def get_ws_manager() -> WebSocketManager:
-    """Get or create the global WebSocketManager singleton."""
-    global _global_ws_manager
-    with _global_lock:
-        if _global_ws_manager is None:
-            _global_ws_manager = WebSocketManager(get_bot_state())
-        return _global_ws_manager
-
-
-def get_scanner() -> BotScanner:
-    """Get or create the global BotScanner singleton."""
-    global _global_scanner
-    with _global_lock:
-        if _global_scanner is None:
-            _global_scanner = BotScanner(get_bot_state(), get_ws_manager(), RiskManager())
-        return _global_scanner
-
-
-# =============================================================================
-# SECTION 13 - STREAMLIT UI
+# SECTION 12 - STREAMLIT UI
 # =============================================================================
 def main():
     """Main Streamlit application function."""
@@ -1368,15 +1351,20 @@ def main():
         )
 
         # ---------------------------------------------------------------------
-        # Use module-level global singletons (persist across page refreshes)
+        # Use session_state for bot state (resets on page refresh)
         # ---------------------------------------------------------------------
-        bot = get_bot_state()
-        ws_manager = get_ws_manager()
-        scanner = get_scanner()
-
-        # Only use session_state for UI-specific state
+        if 'bot_state' not in st.session_state:
+            st.session_state.bot_state = BotState()
+        if 'ws_manager' not in st.session_state:
+            st.session_state.ws_manager = WebSocketManager(st.session_state.bot_state)
+        if 'scanner' not in st.session_state:
+            st.session_state.scanner = BotScanner(st.session_state.bot_state, st.session_state.ws_manager, RiskManager())
         if 'backtest_engine' not in st.session_state:
             st.session_state.backtest_engine = BacktestEngine()
+
+        bot = st.session_state.bot_state
+        ws_manager = st.session_state.ws_manager
+        scanner = st.session_state.scanner
 
         # ---------------------------------------------------------------------
         # SIDEBAR - Bot Control
@@ -1435,6 +1423,7 @@ def main():
                     bot.update_from_ui(capital, leverage, mode, active_strategies, api_key, api_secret)
                     if not bot.is_running:
                         bot.is_running = True
+                        bot.add_log(f"Bot started in {mode.upper()} mode")
                         if mode in ('test', 'real'):
                             ws_manager.start()
                             scanner.start()
@@ -1443,6 +1432,7 @@ def main():
             with col_stop:
                 if st.button('\u23f9 Stop', use_container_width=True):
                     bot.is_running = False
+                    bot.add_log("Bot stopped by user")
                     scanner.stop()
                     ws_manager.stop()
                     st.rerun()
@@ -1484,8 +1474,10 @@ def main():
             st.subheader('\U0001f52c Backtest Results')
             if st.button('Run Backtest Now', type='primary'):
                 with st.spinner('Running backtest...'):
+                    bot.add_log(f"Starting backtest on {len(bot.selected_symbols)} symbols...")
                     results = st.session_state.backtest_engine.run(bot)
                     bot.backtest_results = results
+                    bot.add_log(f"Backtest done: {len(results['trades'])} trades, PnL: ${results['total_pnl']:.2f}")
 
             if bot.backtest_results:
                 r = bot.backtest_results
@@ -1545,6 +1537,16 @@ def main():
             st.info('No completed trades yet.')
 
         # ---------------------------------------------------------------------
+        # Activity Log
+        # ---------------------------------------------------------------------
+        st.subheader('\U0001f4cb Activity Log')
+        if bot.log_entries:
+            log_text = '\n'.join(reversed(bot.log_entries[-50:]))
+            st.code(log_text, language='text')
+        else:
+            st.info('No activity yet. Start the bot to see logs.')
+
+        # ---------------------------------------------------------------------
         # Auto-refresh when bot is running (non-blocking browser-side refresh)
         # ---------------------------------------------------------------------
         if bot.is_running:
@@ -1556,7 +1558,7 @@ def main():
 
 
 # =============================================================================
-# SECTION 14 - ENTRY POINT
+# SECTION 13 - ENTRY POINT
 # =============================================================================
 if __name__ == '__main__':
     main()
