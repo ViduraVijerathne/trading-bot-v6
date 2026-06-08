@@ -29,10 +29,8 @@ from typing import Optional, Dict, List, Any, Callable
 import streamlit as st
 import ccxt
 import pandas as pd
-import pandas_ta as ta
 import numpy as np
 import websockets
-import aiohttp
 
 # =============================================================================
 # SECTION 2 - CONSTANTS & CONFIG
@@ -108,30 +106,46 @@ def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
     Compute technical indicators on an OHLCV DataFrame.
     Expects columns: open, high, low, close, volume.
     Returns DataFrame with added indicator columns.
+    Uses only pandas and numpy (no pandas_ta dependency).
     """
     df = df.copy()
 
     # EMA 20 and EMA 50
-    df['EMA_20'] = df.ta.ema(length=20)
-    df['EMA_50'] = df.ta.ema(length=50)
+    df['EMA_20'] = df['close'].ewm(span=20, adjust=False).mean()
+    df['EMA_50'] = df['close'].ewm(span=50, adjust=False).mean()
 
     # RSI 14
-    df['RSI_14'] = df.ta.rsi(length=14)
+    delta = df['close'].diff()
+    gain = delta.where(delta > 0, 0.0)
+    loss = (-delta).where(delta < 0, 0.0)
+    avg_gain = gain.ewm(alpha=1.0 / 14, min_periods=14, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1.0 / 14, min_periods=14, adjust=False).mean()
+    rs = avg_gain / avg_loss
+    df['RSI_14'] = 100.0 - (100.0 / (1.0 + rs))
 
     # Bollinger Bands (20, 2)
-    bbands = df.ta.bbands(length=20, std=2)
-    if bbands is not None:
-        df = pd.concat([df, bbands], axis=1)
+    bb_mid = df['close'].rolling(window=20).mean()
+    bb_std = df['close'].rolling(window=20).std(ddof=0)
+    df['BBL_20_2.0'] = bb_mid - 2.0 * bb_std
+    df['BBM_20_2.0'] = bb_mid
+    df['BBU_20_2.0'] = bb_mid + 2.0 * bb_std
 
     # MACD (12, 26, 9)
-    macd = df.ta.macd(fast=12, slow=26, signal=9)
-    if macd is not None:
-        df = pd.concat([df, macd], axis=1)
+    ema_fast = df['close'].ewm(span=12, adjust=False).mean()
+    ema_slow = df['close'].ewm(span=26, adjust=False).mean()
+    macd_line = ema_fast - ema_slow
+    macd_signal = macd_line.ewm(span=9, adjust=False).mean()
+    macd_hist = macd_line - macd_signal
+    df['MACD_12_26_9'] = macd_line
+    df['MACDs_12_26_9'] = macd_signal
+    df['MACDh_12_26_9'] = macd_hist
 
     # ATR 14
-    atr = df.ta.atr(length=14)
-    if atr is not None:
-        df['ATRr_14'] = atr
+    high_low = df['high'] - df['low']
+    high_close = (df['high'] - df['close'].shift(1)).abs()
+    low_close = (df['low'] - df['close'].shift(1)).abs()
+    true_range = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+    df['ATRr_14'] = true_range.ewm(alpha=1.0 / 14, min_periods=14, adjust=False).mean()
 
     # Volume SMA 20
     df['volume_sma20'] = df['volume'].rolling(20).mean()
