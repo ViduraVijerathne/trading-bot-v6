@@ -27,7 +27,7 @@ from dataclasses import dataclass, field
 from typing import Optional, Dict, List, Any, Callable
 
 import streamlit as st
-import ccxt
+from streamlit_autorefresh import st_autorefresh
 import pandas as pd
 import numpy as np
 import websockets
@@ -993,6 +993,7 @@ class BotScanner:
     def _fetch_rest_fallback(self, symbol: str) -> Optional[pd.DataFrame]:
         """Fetch OHLCV data via REST API as fallback."""
         try:
+            import ccxt
             exchange = ccxt.binanceusdm({
                 'enableRateLimit': True,
                 'timeout': 10000,
@@ -1058,6 +1059,7 @@ class BotScanner:
     ) -> None:
         """Execute a real order on Binance Futures using CCXT."""
         try:
+            import ccxt
             exchange = ccxt.binanceusdm({
                 'apiKey': self.bot_state.api_key,
                 'secret': self.bot_state.api_secret,
@@ -1316,7 +1318,7 @@ class BacktestEngine:
 # =============================================================================
 # SECTION 12 - MODULE-LEVEL GLOBAL SINGLETONS (persist across page refreshes)
 # =============================================================================
-_global_lock = threading.Lock()
+_global_lock = threading.RLock()
 _global_bot_state: Optional[BotState] = None
 _global_ws_manager: Optional[WebSocketManager] = None
 _global_scanner: Optional[BotScanner] = None
@@ -1354,192 +1356,199 @@ def get_scanner() -> BotScanner:
 # =============================================================================
 def main():
     """Main Streamlit application function."""
-    st.set_page_config(
-        page_title='Crypto Futures Bot',
-        layout='wide',
-        page_icon='\U0001f4c8'
-    )
-
-    # -------------------------------------------------------------------------
-    # Use module-level global singletons (persist across page refreshes)
-    # -------------------------------------------------------------------------
-    bot = get_bot_state()
-    ws_manager = get_ws_manager()
-    scanner = get_scanner()
-
-    # Only use session_state for UI-specific state
-    if 'backtest_engine' not in st.session_state:
-        st.session_state.backtest_engine = BacktestEngine()
-
-    # -------------------------------------------------------------------------
-    # SIDEBAR - Bot Control
-    # -------------------------------------------------------------------------
-    with st.sidebar:
-        st.title('\u2699\ufe0f Bot Control')
-        mode = st.radio('Mode', ['backtrack', 'test', 'real'], index=1)
-        st.divider()
-
-        if mode == 'real':
-            api_key = st.text_input('Binance API Key', type='password')
-            api_secret = st.text_input('Binance Secret Key', type='password')
-        else:
-            api_key = ''
-            api_secret = ''
-
-        capital = st.slider('Capital ($)', 0.0, 20.0, 20.0, 0.5)
-        leverage = st.slider('Leverage', 1, 10, 3)
-        max_concurrent = st.selectbox('Max Concurrent Trades', [1, 2], index=1)
-        st.divider()
-
-        # Coin Pair Selector
-        st.subheader('\U0001f4b1 Coins to Scan')
-        selected_symbols = st.multiselect(
-            'Select coin pairs',
-            options=AVAILABLE_SYMBOLS,
-            default=bot.selected_symbols,
-            help='Choose which coin pairs the bot will scan for trading signals.'
+    try:
+        st.set_page_config(
+            page_title='Crypto Futures Bot',
+            layout='wide',
+            page_icon='\U0001f4c8'
         )
-        # Update bot state with selected symbols
-        if selected_symbols:
-            bot.selected_symbols = selected_symbols
-        st.divider()
 
-        st.subheader('\U0001f4ca Strategy Toggles')
-        strat_trend = st.checkbox('A: Trend Following (EMA Cross + RSI)', value=True)
-        strat_mean = st.checkbox('B: Mean Reversion (BB + RSI)', value=True)
-        strat_mom = st.checkbox('C: Momentum (MACD + Volume)', value=True)
-        strat_break = st.checkbox('D: Breakout (24H High/Low)', value=True)
-        active_strategies = {
-            'trend': strat_trend,
-            'mean_reversion': strat_mean,
-            'momentum': strat_mom,
-            'breakout': strat_break,
-        }
-        st.divider()
+        # -------------------------------------------------------------------------
+        # Use module-level global singletons (persist across page refreshes)
+        # -------------------------------------------------------------------------
+        bot = get_bot_state()
+        ws_manager = get_ws_manager()
+        scanner = get_scanner()
 
-        col_start, col_stop = st.columns(2)
-        with col_start:
-            if st.button('\u25b6 Start', use_container_width=True, type='primary'):
-                bot.update_from_ui(capital, leverage, mode, active_strategies, api_key, api_secret)
-                if not bot.is_running:
-                    bot.is_running = True
-                    if mode in ('test', 'real'):
-                        ws_manager.start()
-                        scanner.start()
+        # Only use session_state for UI-specific state
+        if 'backtest_engine' not in st.session_state:
+            st.session_state.backtest_engine = BacktestEngine()
+
+        # -------------------------------------------------------------------------
+        # SIDEBAR - Bot Control
+        # -------------------------------------------------------------------------
+        with st.sidebar:
+            st.title('\u2699\ufe0f Bot Control')
+            mode = st.radio('Mode', ['backtrack', 'test', 'real'], index=1)
+            st.divider()
+
+            if mode == 'real':
+                api_key = st.text_input('Binance API Key', type='password')
+                api_secret = st.text_input('Binance Secret Key', type='password')
+            else:
+                api_key = ''
+                api_secret = ''
+
+            capital = st.slider('Capital ($)', 0.0, 20.0, 20.0, 0.5)
+            leverage = st.slider('Leverage', 1, 10, 3)
+            max_concurrent = st.selectbox('Max Concurrent Trades', [1, 2], index=1)
+            st.divider()
+
+            # Coin Pair Selector
+            st.subheader('\U0001f4b1 Coins to Scan')
+            if 'selected_coins' not in st.session_state:
+                st.session_state.selected_coins = list(DEFAULT_SELECTED_SYMBOLS)
+
+            selected_symbols = st.multiselect(
+                'Select coin pairs',
+                options=AVAILABLE_SYMBOLS,
+                key='selected_coins',
+                help='Choose which coin pairs the bot will scan for trading signals.'
+            )
+            # Update bot state with selected symbols
+            if selected_symbols:
+                bot.selected_symbols = selected_symbols
+            else:
+                bot.selected_symbols = list(DEFAULT_SELECTED_SYMBOLS)
+            st.divider()
+
+            st.subheader('\U0001f4ca Strategy Toggles')
+            strat_trend = st.checkbox('A: Trend Following (EMA Cross + RSI)', value=True)
+            strat_mean = st.checkbox('B: Mean Reversion (BB + RSI)', value=True)
+            strat_mom = st.checkbox('C: Momentum (MACD + Volume)', value=True)
+            strat_break = st.checkbox('D: Breakout (24H High/Low)', value=True)
+            active_strategies = {
+                'trend': strat_trend,
+                'mean_reversion': strat_mean,
+                'momentum': strat_mom,
+                'breakout': strat_break,
+            }
+            st.divider()
+
+            col_start, col_stop = st.columns(2)
+            with col_start:
+                if st.button('\u25b6 Start', use_container_width=True, type='primary'):
+                    bot.update_from_ui(capital, leverage, mode, active_strategies, api_key, api_secret)
+                    if not bot.is_running:
+                        bot.is_running = True
+                        if mode in ('test', 'real'):
+                            ws_manager.start()
+                            scanner.start()
+                        st.rerun()
+
+            with col_stop:
+                if st.button('\u23f9 Stop', use_container_width=True):
+                    bot.is_running = False
+                    scanner.stop()
+                    ws_manager.stop()
                     st.rerun()
 
-        with col_stop:
-            if st.button('\u23f9 Stop', use_container_width=True):
-                bot.is_running = False
-                scanner.stop()
-                ws_manager.stop()
-                st.rerun()
+            # Always sync strategy toggles
+            bot.active_strategies = active_strategies
+            bot.capital = capital
+            bot.leverage = leverage
 
-        # Always sync strategy toggles
-        bot.active_strategies = active_strategies
-        bot.capital = capital
-        bot.leverage = leverage
+            # Status indicator
+            if bot.is_running:
+                st.success('\U0001f7e2 Bot Running')
+            else:
+                st.error('\U0001f534 Bot Stopped')
 
-        # Status indicator
-        if bot.is_running:
-            st.success('\U0001f7e2 Bot Running')
+            ws_status = '\U0001f7e2 Connected' if ws_manager.connected else '\U0001f534 Disconnected'
+            st.caption(f'WebSocket: {ws_status}')
+
+        # -------------------------------------------------------------------------
+        # MAIN AREA
+        # -------------------------------------------------------------------------
+        st.title('\U0001f4c8 Binance Futures Trading Bot')
+        last_update_str = bot.last_update.strftime("%H:%M:%S") if bot.last_update else "Never"
+        st.caption(f'Mode: {mode.upper()} | Last Update: {last_update_str}')
+
+        # Metrics row
+        stats = bot.get_stats()
+        c1, c2, c3, c4, c5 = st.columns(5)
+        c1.metric('\U0001f4b0 Balance', f'${stats["balance"]:.2f}', delta=f'{stats["total_pnl"]:+.2f}')
+        c2.metric('\U0001f4ca Total Trades', stats['total_trades'])
+        c3.metric('\u2705 Win Rate', f'{stats["win_rate"]:.1f}%')
+        c4.metric('\U0001f3c6 Wins / Losses', f'{stats["win_count"]} / {stats["loss_count"]}')
+        c5.metric('\U0001f4c2 Open Positions', stats['open_positions'])
+
+        # -------------------------------------------------------------------------
+        # Backtest section
+        # -------------------------------------------------------------------------
+        if mode == 'backtrack':
+            st.subheader('\U0001f52c Backtest Results')
+            if st.button('Run Backtest Now', type='primary'):
+                with st.spinner('Running backtest...'):
+                    results = st.session_state.backtest_engine.run(bot)
+                    bot.backtest_results = results
+
+            if bot.backtest_results:
+                r = bot.backtest_results
+                bc1, bc2, bc3, bc4 = st.columns(4)
+                bc1.metric('Total PnL', f'${r["total_pnl"]:.2f}')
+                bc2.metric('Win Rate', f'{r["win_rate"]:.1f}%')
+                bc3.metric('Max Drawdown', f'{r["max_drawdown"] * 100:.1f}%')
+                bc4.metric('Sharpe Ratio', f'{r["sharpe_ratio"]:.2f}')
+
+                # Per-strategy breakdown
+                if r.get('by_strategy'):
+                    st.subheader('Strategy Breakdown')
+                    strat_rows = []
+                    for sname, sdata in r['by_strategy'].items():
+                        strat_rows.append({
+                            'Strategy': sname,
+                            'Trades': sdata['trades'],
+                            'PnL ($)': round(sdata['pnl'], 2),
+                            'Win Rate (%)': round(sdata['win_rate'], 1),
+                        })
+                    st.dataframe(pd.DataFrame(strat_rows), use_container_width=True)
+
+                # Backtest trades table
+                if r.get('trades'):
+                    st.subheader('Simulated Trades')
+                    trades_df = pd.DataFrame([
+                        {
+                            'Symbol': t['symbol'],
+                            'Strategy': t['strategy'],
+                            'Side': t['side'],
+                            'Entry': round(t['entry'], 4),
+                            'Exit': round(t['exit'], 4),
+                            'PnL': round(t['pnl'], 4),
+                        }
+                        for t in r['trades']
+                    ])
+                    st.dataframe(trades_df, use_container_width=True)
+
+        # -------------------------------------------------------------------------
+        # Open Positions table
+        # -------------------------------------------------------------------------
+        st.subheader('\U0001f4c2 Open Positions')
+        open_df = bot.to_open_positions_df()
+        if open_df is not None and not open_df.empty:
+            st.dataframe(open_df, use_container_width=True)
         else:
-            st.error('\U0001f534 Bot Stopped')
+            st.info('No open positions.')
 
-        ws_status = '\U0001f7e2 Connected' if ws_manager.connected else '\U0001f534 Disconnected'
-        st.caption(f'WebSocket: {ws_status}')
+        # -------------------------------------------------------------------------
+        # Trade History table
+        # -------------------------------------------------------------------------
+        st.subheader('\U0001f4dc Trade History')
+        history_df = bot.to_trade_history_df()
+        if history_df is not None and not history_df.empty:
+            st.dataframe(history_df, use_container_width=True, height=400)
+        else:
+            st.info('No completed trades yet.')
 
-    # -------------------------------------------------------------------------
-    # MAIN AREA
-    # -------------------------------------------------------------------------
-    st.title('\U0001f4c8 Binance Futures Trading Bot')
-    last_update_str = bot.last_update.strftime("%H:%M:%S") if bot.last_update else "Never"
-    st.caption(f'Mode: {mode.upper()} | Last Update: {last_update_str}')
+        # -------------------------------------------------------------------------
+        # Auto-refresh when bot is running (non-blocking browser-side refresh)
+        # -------------------------------------------------------------------------
+        if bot.is_running:
+            st_autorefresh(interval=5000, limit=None, key="bot_autorefresh")
 
-    # Metrics row
-    stats = bot.get_stats()
-    c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric('\U0001f4b0 Balance', f'${stats["balance"]:.2f}', delta=f'{stats["total_pnl"]:+.2f}')
-    c2.metric('\U0001f4ca Total Trades', stats['total_trades'])
-    c3.metric('\u2705 Win Rate', f'{stats["win_rate"]:.1f}%')
-    c4.metric('\U0001f3c6 Wins / Losses', f'{stats["win_count"]} / {stats["loss_count"]}')
-    c5.metric('\U0001f4c2 Open Positions', stats['open_positions'])
-
-    # -------------------------------------------------------------------------
-    # Backtest section
-    # -------------------------------------------------------------------------
-    if mode == 'backtrack':
-        st.subheader('\U0001f52c Backtest Results')
-        if st.button('Run Backtest Now', type='primary'):
-            with st.spinner('Running backtest...'):
-                results = st.session_state.backtest_engine.run(bot)
-                bot.backtest_results = results
-
-        if bot.backtest_results:
-            r = bot.backtest_results
-            bc1, bc2, bc3, bc4 = st.columns(4)
-            bc1.metric('Total PnL', f'${r["total_pnl"]:.2f}')
-            bc2.metric('Win Rate', f'{r["win_rate"]:.1f}%')
-            bc3.metric('Max Drawdown', f'{r["max_drawdown"] * 100:.1f}%')
-            bc4.metric('Sharpe Ratio', f'{r["sharpe_ratio"]:.2f}')
-
-            # Per-strategy breakdown
-            if r.get('by_strategy'):
-                st.subheader('Strategy Breakdown')
-                strat_rows = []
-                for sname, sdata in r['by_strategy'].items():
-                    strat_rows.append({
-                        'Strategy': sname,
-                        'Trades': sdata['trades'],
-                        'PnL ($)': round(sdata['pnl'], 2),
-                        'Win Rate (%)': round(sdata['win_rate'], 1),
-                    })
-                st.dataframe(pd.DataFrame(strat_rows), use_container_width=True)
-
-            # Backtest trades table
-            if r.get('trades'):
-                st.subheader('Simulated Trades')
-                trades_df = pd.DataFrame([
-                    {
-                        'Symbol': t['symbol'],
-                        'Strategy': t['strategy'],
-                        'Side': t['side'],
-                        'Entry': round(t['entry'], 4),
-                        'Exit': round(t['exit'], 4),
-                        'PnL': round(t['pnl'], 4),
-                    }
-                    for t in r['trades']
-                ])
-                st.dataframe(trades_df, use_container_width=True)
-
-    # -------------------------------------------------------------------------
-    # Open Positions table
-    # -------------------------------------------------------------------------
-    st.subheader('\U0001f4c2 Open Positions')
-    open_df = bot.to_open_positions_df()
-    if open_df is not None and not open_df.empty:
-        st.dataframe(open_df, use_container_width=True)
-    else:
-        st.info('No open positions.')
-
-    # -------------------------------------------------------------------------
-    # Trade History table
-    # -------------------------------------------------------------------------
-    st.subheader('\U0001f4dc Trade History')
-    history_df = bot.to_trade_history_df()
-    if history_df is not None and not history_df.empty:
-        st.dataframe(history_df, use_container_width=True, height=400)
-    else:
-        st.info('No completed trades yet.')
-
-    # -------------------------------------------------------------------------
-    # Auto-refresh when bot is running (non-blocking browser-side refresh)
-    # -------------------------------------------------------------------------
-    if bot.is_running:
-        st.markdown(
-            '<meta http-equiv="refresh" content="5">',
-            unsafe_allow_html=True
-        )
+    except Exception as e:
+        st.error(f"Application error: {e}")
+        st.exception(e)
 
 
 # =============================================================================
