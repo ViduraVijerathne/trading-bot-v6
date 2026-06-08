@@ -954,6 +954,10 @@ class BotScanner:
                 if df is None or len(df) < 60:
                     df = self._fetch_rest_fallback(symbol)
 
+                # Mock data fallback for test mode if real data unavailable
+                if (df is None or len(df) < 60) and self.bot_state.mode == 'test':
+                    df = generate_mock_ohlcv(symbol, 200)
+
                 if df is None or len(df) < 60:
                     continue
 
@@ -1161,7 +1165,7 @@ class BacktestEngine:
     ) -> Dict[str, Any]:
         """Run backtest over mock data for enabled strategies."""
         if symbols is None:
-            symbols = SCAN_SYMBOLS[:3]
+            symbols = bot_state.selected_symbols if bot_state.selected_symbols else SCAN_SYMBOLS[:3]
 
         strategy_fns: Dict[str, Callable] = {}
         if bot_state.active_strategies.get('trend', False):
