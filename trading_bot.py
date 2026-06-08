@@ -995,6 +995,7 @@ class BotScanner:
         try:
             exchange = ccxt.binanceusdm({
                 'enableRateLimit': True,
+                'timeout': 10000,
                 'options': {'defaultType': 'future'},
             })
             ohlcv = exchange.fetch_ohlcv(symbol, TIMEFRAME, limit=CANDLE_LIMIT)
@@ -1369,8 +1370,6 @@ def main():
     # Only use session_state for UI-specific state
     if 'backtest_engine' not in st.session_state:
         st.session_state.backtest_engine = BacktestEngine()
-    if 'auto_refresh' not in st.session_state:
-        st.session_state.auto_refresh = bot.is_running
 
     # -------------------------------------------------------------------------
     # SIDEBAR - Bot Control
@@ -1427,7 +1426,6 @@ def main():
                     if mode in ('test', 'real'):
                         ws_manager.start()
                         scanner.start()
-                    st.session_state.auto_refresh = True
                     st.rerun()
 
         with col_stop:
@@ -1435,7 +1433,6 @@ def main():
                 bot.is_running = False
                 scanner.stop()
                 ws_manager.stop()
-                st.session_state.auto_refresh = False
                 st.rerun()
 
         # Always sync strategy toggles
@@ -1536,11 +1533,13 @@ def main():
         st.info('No completed trades yet.')
 
     # -------------------------------------------------------------------------
-    # Auto-refresh when bot is running
+    # Auto-refresh when bot is running (non-blocking browser-side refresh)
     # -------------------------------------------------------------------------
-    if st.session_state.auto_refresh and bot.is_running:
-        time.sleep(3)
-        st.rerun()
+    if bot.is_running:
+        st.markdown(
+            '<meta http-equiv="refresh" content="5">',
+            unsafe_allow_html=True
+        )
 
 
 # =============================================================================
