@@ -27,10 +27,10 @@ from dataclasses import dataclass, field
 from typing import Optional, Dict, List, Any, Callable
 
 import streamlit as st
-from streamlit_autorefresh import st_autorefresh
 import pandas as pd
 import numpy as np
 import websockets
+from streamlit_autorefresh import st_autorefresh
 
 # =============================================================================
 # SECTION 2 - CONSTANTS & CONFIG
@@ -1367,9 +1367,9 @@ def main():
             page_icon='\U0001f4c8'
         )
 
-        # -------------------------------------------------------------------------
+        # ---------------------------------------------------------------------
         # Use module-level global singletons (persist across page refreshes)
-        # -------------------------------------------------------------------------
+        # ---------------------------------------------------------------------
         bot = get_bot_state()
         ws_manager = get_ws_manager()
         scanner = get_scanner()
@@ -1378,9 +1378,9 @@ def main():
         if 'backtest_engine' not in st.session_state:
             st.session_state.backtest_engine = BacktestEngine()
 
-        # -------------------------------------------------------------------------
+        # ---------------------------------------------------------------------
         # SIDEBAR - Bot Control
-        # -------------------------------------------------------------------------
+        # ---------------------------------------------------------------------
         with st.sidebar:
             st.title('\u2699\ufe0f Bot Control')
             mode = st.radio('Mode', ['backtrack', 'test', 'real'], index=1)
@@ -1461,9 +1461,9 @@ def main():
             ws_status = '\U0001f7e2 Connected' if ws_manager.connected else '\U0001f534 Disconnected'
             st.caption(f'WebSocket: {ws_status}')
 
-        # -------------------------------------------------------------------------
+        # ---------------------------------------------------------------------
         # MAIN AREA
-        # -------------------------------------------------------------------------
+        # ---------------------------------------------------------------------
         st.title('\U0001f4c8 Binance Futures Trading Bot')
         last_update_str = bot.last_update.strftime("%H:%M:%S") if bot.last_update else "Never"
         st.caption(f'Mode: {mode.upper()} | Last Update: {last_update_str}')
@@ -1477,14 +1477,14 @@ def main():
         c4.metric('\U0001f3c6 Wins / Losses', f'{stats["win_count"]} / {stats["loss_count"]}')
         c5.metric('\U0001f4c2 Open Positions', stats['open_positions'])
 
-        # -------------------------------------------------------------------------
+        # ---------------------------------------------------------------------
         # Backtest section
-        # -------------------------------------------------------------------------
+        # ---------------------------------------------------------------------
         if mode == 'backtrack':
             st.subheader('\U0001f52c Backtest Results')
             if st.button('Run Backtest Now', type='primary'):
                 with st.spinner('Running backtest...'):
-                    results = st.session_state.backtest_engine.run(bot, symbols=bot.selected_symbols)
+                    results = st.session_state.backtest_engine.run(bot)
                     bot.backtest_results = results
 
             if bot.backtest_results:
@@ -1524,9 +1524,9 @@ def main():
                     ])
                     st.dataframe(trades_df, use_container_width=True)
 
-        # -------------------------------------------------------------------------
+        # ---------------------------------------------------------------------
         # Open Positions table
-        # -------------------------------------------------------------------------
+        # ---------------------------------------------------------------------
         st.subheader('\U0001f4c2 Open Positions')
         open_df = bot.to_open_positions_df()
         if open_df is not None and not open_df.empty:
@@ -1534,9 +1534,9 @@ def main():
         else:
             st.info('No open positions.')
 
-        # -------------------------------------------------------------------------
+        # ---------------------------------------------------------------------
         # Trade History table
-        # -------------------------------------------------------------------------
+        # ---------------------------------------------------------------------
         st.subheader('\U0001f4dc Trade History')
         history_df = bot.to_trade_history_df()
         if history_df is not None and not history_df.empty:
@@ -1544,9 +1544,9 @@ def main():
         else:
             st.info('No completed trades yet.')
 
-        # -------------------------------------------------------------------------
+        # ---------------------------------------------------------------------
         # Auto-refresh when bot is running (non-blocking browser-side refresh)
-        # -------------------------------------------------------------------------
+        # ---------------------------------------------------------------------
         if bot.is_running:
             st_autorefresh(interval=5000, limit=None, key="bot_autorefresh")
 
